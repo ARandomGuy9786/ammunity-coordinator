@@ -126,6 +126,56 @@ async def send_message(message: MessageRequest):
         raise HTTPException(status_code=502, detail=f"Failed to reach destination agent: {str(e)}")
 
 # -------------------------------------------------------
+# INTELLIGENT ROUTING
+# Routes message through the routing agent for security
+# checking and dynamic agent selection
+# -------------------------------------------------------
+@router.post("/messages/route")
+async def route_message_intelligent(message: MessageRequest):
+    # Verify sending agent exists and is approved
+    if message.from_agent_id not in agent_registry:
+        raise HTTPException(status_code=404, detail="Sending agent not found")
+    if not agent_registry[message.from_agent_id].approved:
+        raise HTTPException(status_code=403, detail="Sending agent not approved")
+
+    # Find the routing agent
+    routing_agent = next(
+        (a for a in agent_registry.values() if a.username == "routing-agent" and a.approved),
+        None
+    )
+
+    if not routing_agent:
+        raise HTTPException(status_code=503, detail="Routing agent not available")
+
+    # Log the request
+    log = LogEntry(
+        timestamp=datetime.utcnow().isoformat(),
+        from_agent_id=message.from_agent_id,
+        to_agent_id=routing_agent.agent_id,
+        task_description=message.task_description,
+        status="pending"
+    )
+
+    # Forward to routing agent
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                f"{routing_agent.endpoint_url}/route",
+                json={
+                    "from_agent_id": message.from_agent_id,
+                    "task_description": message.task_description,
+                    "message": message.payload.get("message", "")
+                }
+            )
+        log.status = "delivered"
+        message_logs.append(log)
+        return response.json()
+    except Exception as e:
+        log.status = "failed"
+        message_logs.append(log)
+        raise HTTPException(status_code=502, detail=f"Routing agent unreachable: {str(e)}")
+
+# -------------------------------------------------------
 # LOGS (admin view)
 # -------------------------------------------------------
 @router.get("/logs")
