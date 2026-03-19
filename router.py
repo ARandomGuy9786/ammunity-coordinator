@@ -1,34 +1,34 @@
 from fastapi import APIRouter, HTTPException
 from models import AgentRegistration, Agent, MessageRequest, LogEntry
+from database import (
+    db_register_agent, db_get_agent, db_get_all_agents,
+    db_approve_agent, db_delete_agent, db_discover_agents,
+    db_add_log, db_get_logs
+)
 from datetime import datetime
 import uuid
 import httpx
 
 router = APIRouter()
 
-# --- In-memory storage (no database needed for demo) ---
-agent_registry: dict[str, Agent] = {}
-message_logs: list[LogEntry] = []
-
 # -------------------------------------------------------
 # REGISTRATION
-# Developers call this to register their agent
 # -------------------------------------------------------
 @router.post("/agents/register")
 async def register_agent(registration: AgentRegistration):
-    agent_id = str(uuid.uuid4())  # generate unique ID for the agent
-    agent = Agent(
-        agent_id=agent_id,
-        username=registration.username,
-        description=registration.description,
-        endpoint_url=registration.endpoint_url,
-        capabilities=registration.capabilities,
-        skills=registration.skills,
-        community=registration.community,
-        approved=False,
-        registered_at=datetime.utcnow().isoformat()
-    )
-    agent_registry[agent_id] = agent
+    agent_id = str(uuid.uuid4())
+    agent = {
+        "agent_id": agent_id,
+        "username": registration.username,
+        "description": registration.description,
+        "endpoint_url": registration.endpoint_url,
+        "capabilities": registration.capabilities,
+        "skills": registration.skills,
+        "community": registration.community,
+        "approved": False,
+        "registered_at": datetime.utcnow().isoformat()
+    }
+    db_register_agent(agent)
     return {
         "message": "Agent registered successfully. Awaiting approval.",
         "agent_id": agent_id
@@ -36,18 +36,28 @@ async def register_agent(registration: AgentRegistration):
 
 # -------------------------------------------------------
 # APPROVAL
-# Admin calls this to approve a registered agent
 # -------------------------------------------------------
 @router.post("/agents/{agent_id}/approve")
 async def approve_agent(agent_id: str):
-    if agent_id not in agent_registry:
+    agent = db_get_agent(agent_id)
+    if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    agent_registry[agent_id].approved = True
+    db_approve_agent(agent_id)
     return {"message": f"Agent {agent_id} approved successfully"}
 
 # -------------------------------------------------------
+# DELETE
+# -------------------------------------------------------
+@router.delete("/agents/{agent_id}")
+async def delete_agent(agent_id: str):
+    agent = db_get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    db_delete_agent(agent_id)
+    return {"message": f"Agent {agent['username']} deleted successfully"}
+
+# -------------------------------------------------------
 # DISCOVERY
-# Agents call this to find other agents
 # -------------------------------------------------------
 @router.get("/agents/discover")
 async def discover_agents(
@@ -55,129 +65,109 @@ async def discover_agents(
     skill: str = None,
     capability: str = None
 ):
-    results = [a for a in agent_registry.values() if a.approved]
-
-    if community:
-        results = [a for a in results if a.community == community]
-    if skill:
-        results = [a for a in results if skill in a.skills]
-    if capability:
-        results = [a for a in results if capability in a.capabilities]
-
-    return {"agents": results}
+    agents = db_discover_agents(community, skill, capability)
+    return {"agents": agents}
 
 # -------------------------------------------------------
-# LIST ALL AGENTS (admin view)
+# LIST ALL AGENTS
 # -------------------------------------------------------
 @router.get("/agents")
 async def list_agents():
-    return {"agents": list(agent_registry.values())}
+    agents = db_get_all_agents()
+    return {"agents": agents}
 
 # -------------------------------------------------------
-# MESSAGE ROUTING
-# Agent A sends a message → coordinator forwards it to Agent B
+# MESSAGE ROUTING (direct)
 # -------------------------------------------------------
 @router.post("/messages/send")
 async def send_message(message: MessageRequest):
-    # Verify sending agent exists and is approved
-    if message.from_agent_id not in agent_registry:
+    from_agent = db_get_agent(message.from_agent_id)
+    if not from_agent:
         raise HTTPException(status_code=404, detail="Sending agent not found")
-    if not agent_registry[message.from_agent_id].approved:
+    if not from_agent["approved"]:
         raise HTTPException(status_code=403, detail="Sending agent not approved")
 
-    # Verify receiving agent exists and is approved
-    if message.to_agent_id not in agent_registry:
+    to_agent = db_get_agent(message.to_agent_id)
+    if not to_agent:
         raise HTTPException(status_code=404, detail="Destination agent not found")
-    if not agent_registry[message.to_agent_id].approved:
+    if not to_agent["approved"]:
         raise HTTPException(status_code=403, detail="Destination agent not approved")
 
-    # Get destination agent's endpoint
-    destination = agent_registry[message.to_agent_id]
+    log = {
+        "from_agent_id": message.from_agent_id,
+        "to_agent_id": message.to_agent_id,
+        "task_description": message.task_description,
+        "status": "pending"
+    }
 
-    # Log the request
-    log = LogEntry(
-        timestamp=datetime.utcnow().isoformat(),
-        from_agent_id=message.from_agent_id,
-        to_agent_id=message.to_agent_id,
-        task_description=message.task_description,
-        status="pending"
-    )
-
-    # Forward the message to the destination agent
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
-                f"{destination.endpoint_url}/a2a/task",
+                f"{to_agent['endpoint_url']}/a2a/task",
                 json={
                     "from_agent_id": message.from_agent_id,
                     "task_description": message.task_description,
                     "payload": message.payload
                 }
             )
-        log.status = "delivered"
-        message_logs.append(log)
-        return {
-            "status": "delivered",
-            "response": response.json()
-        }
+        log["status"] = "delivered"
+        db_add_log(log)
+        return {"status": "delivered", "response": response.json()}
     except Exception as e:
-        log.status = "failed"
-        message_logs.append(log)
+        log["status"] = "failed"
+        db_add_log(log)
         raise HTTPException(status_code=502, detail=f"Failed to reach destination agent: {str(e)}")
 
 # -------------------------------------------------------
 # INTELLIGENT ROUTING
-# Routes message through the routing agent for security
-# checking and dynamic agent selection
 # -------------------------------------------------------
 @router.post("/messages/route")
 async def route_message_intelligent(message: MessageRequest):
-    # Verify sending agent exists and is approved
-    if message.from_agent_id not in agent_registry:
+    from_agent = db_get_agent(message.from_agent_id)
+    if not from_agent:
         raise HTTPException(status_code=404, detail="Sending agent not found")
-    if not agent_registry[message.from_agent_id].approved:
+    if not from_agent["approved"]:
         raise HTTPException(status_code=403, detail="Sending agent not approved")
 
     # Find the routing agent
+    all_agents = db_get_all_agents()
     routing_agent = next(
-        (a for a in agent_registry.values() if a.username == "routing-agent" and a.approved),
+        (a for a in all_agents if a["username"] == "routing-agent" and a["approved"]),
         None
     )
 
     if not routing_agent:
         raise HTTPException(status_code=503, detail="Routing agent not available")
 
-    # Log the request
-    log = LogEntry(
-        timestamp=datetime.utcnow().isoformat(),
-        from_agent_id=message.from_agent_id,
-        to_agent_id=routing_agent.agent_id,
-        task_description=message.task_description,
-        status="pending"
-    )
+    log = {
+        "from_agent_id": message.from_agent_id,
+        "to_agent_id": routing_agent["agent_id"],
+        "task_description": message.task_description,
+        "status": "pending"
+    }
 
-    # Forward to routing agent
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
-                f"{routing_agent.endpoint_url}/route",
+                f"{routing_agent['endpoint_url']}/route",
                 json={
                     "from_agent_id": message.from_agent_id,
                     "task_description": message.task_description,
                     "message": message.payload.get("message", "")
                 }
             )
-        log.status = "delivered"
-        message_logs.append(log)
+        log["status"] = "delivered"
+        db_add_log(log)
         return response.json()
     except Exception as e:
-        log.status = "failed"
-        message_logs.append(log)
+        log["status"] = "failed"
+        db_add_log(log)
         raise HTTPException(status_code=502, detail=f"Routing agent unreachable: {str(e)}")
 
 # -------------------------------------------------------
-# LOGS (admin view)
+# LOGS
 # -------------------------------------------------------
 @router.get("/logs")
 async def get_logs():
-    return {"logs": message_logs}
+    logs = db_get_logs()
+    return {"logs": logs}
