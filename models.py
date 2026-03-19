@@ -2,6 +2,7 @@ from pydantic import BaseModel
 from typing import List
 from datetime import datetime
 import uuid
+from typing import List
 
 # Submitted by a developer when registering a new agent
 class AgentRegistration(BaseModel):
@@ -38,3 +39,5 @@ class LogEntry(BaseModel):
     to_agent_id: str
     task_description: str
     status: str
+    message: Optional[str] = None
+    response: Optional[str] = None

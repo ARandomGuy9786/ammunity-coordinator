@@ -97,7 +97,8 @@ async def send_message(message: MessageRequest):
         "from_agent_id": message.from_agent_id,
         "to_agent_id": message.to_agent_id,
         "task_description": message.task_description,
-        "status": "pending"
+        "status": "pending",
+        "message": message.payload.get("message", "")
     }
 
     try:
@@ -111,6 +112,7 @@ async def send_message(message: MessageRequest):
                 }
             )
         log["status"] = "delivered"
+        log["response"] = str(response.json().get("response", {}).get("result", ""))
         db_add_log(log)
         return {"status": "delivered", "response": response.json()}
     except Exception as e:
@@ -143,7 +145,8 @@ async def route_message_intelligent(message: MessageRequest):
         "from_agent_id": message.from_agent_id,
         "to_agent_id": routing_agent["agent_id"],
         "task_description": message.task_description,
-        "status": "pending"
+        "status": "pending",
+        "message": message.payload.get("message", "")
     }
 
     try:
@@ -156,9 +159,11 @@ async def route_message_intelligent(message: MessageRequest):
                     "message": message.payload.get("message", "")
                 }
             )
+        response_data = response.json()
         log["status"] = "delivered"
+        log["response"] = str(response_data.get("response", {}).get("result", ""))
         db_add_log(log)
-        return response.json()
+        return response_data
     except Exception as e:
         log["status"] = "failed"
         db_add_log(log)
