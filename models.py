@@ -2,7 +2,7 @@ from pydantic import BaseModel
 from typing import List
 from datetime import datetime
 import uuid
-from typing import List
+from typing import List, Optional
 
 # Submitted by a developer when registering a new agent
 class AgentRegistration(BaseModel):
