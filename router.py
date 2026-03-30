@@ -102,7 +102,7 @@ async def send_message(message: MessageRequest):
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=300) as client:
             response = await client.post(
                 f"{to_agent['endpoint_url']}/a2a/task",
                 json={
@@ -150,7 +150,7 @@ async def route_message_intelligent(message: MessageRequest):
     }
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=300) as client:
             response = await client.post(
                 f"{routing_agent['endpoint_url']}/route",
                 json={
